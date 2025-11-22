@@ -142,12 +142,19 @@ steps:
     inputs:
       versionSpec: '18.x'
 
-  - task: Npm@1
-    displayName: 'NPM Install (se houver package.json)'
-    condition: and(succeeded(), exists('$(logicAppPath)/package.json'))
+  - task: Bash@3
+    displayName: 'NPM Install (if package.json exists)'
+    continueOnError: true
     inputs:
-      command: 'install'
-      workingDir: '$(logicAppPath)'
+      targetType: 'inline'
+      workingDirectory: '$(logicAppPath)'
+      script: |
+        if [ -f "package.json" ]; then
+          echo "Found package.json, installing dependencies..."
+          npm install
+        else
+          echo "No package.json found, skipping npm install"
+        fi
 
   - task: ArchiveFiles@2
     displayName: 'Criar pacote ZIP do $(logicAppName)'
