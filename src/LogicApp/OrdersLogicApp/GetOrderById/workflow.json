@@ -1,0 +1,82 @@
+{
+  "definition": {
+    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+    "actions": {
+      "Parse_Order_Id": {
+        "type": "ParseJson",
+        "inputs": {
+          "content": "@triggerBody()",
+          "schema": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "integer"
+              }
+            }
+          }
+        },
+        "runAfter": {}
+      },
+      "Initialize_Order": {
+        "type": "InitializeVariable",
+        "inputs": {
+          "variables": [
+            {
+              "name": "order",
+              "type": "object",
+              "value": {
+                "orderId": "@body('Parse_Order_Id')['id']",
+                "customerName": "John Doe",
+                "totalAmount": 299.99,
+                "orderDate": "2024-01-10T10:00:00Z",
+                "status": "Completed"
+              }
+            }
+          ]
+        },
+        "runAfter": {
+          "Parse_Order_Id": [
+            "Succeeded"
+          ]
+        }
+      },
+      "Response": {
+        "type": "Response",
+        "inputs": {
+          "statusCode": 200,
+          "body": {
+            "success": true,
+            "message": "Order retrieved successfully",
+            "data": "@variables('order')"
+          },
+          "headers": {
+            "Content-Type": "application/json"
+          }
+        },
+        "runAfter": {
+          "Initialize_Order": [
+            "Succeeded"
+          ]
+        }
+      }
+    },
+    "triggers": {
+      "manual": {
+        "type": "Request",
+        "kind": "Http",
+        "inputs": {
+          "schema": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "integer"
+              }
+            }
+          },
+          "method": "POST"
+        }
+      }
+    },
+    "outputs": {}
+  }
+}

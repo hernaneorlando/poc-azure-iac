@@ -1,0 +1,180 @@
+# =============================================================================
+# Pipeline Logic Apps - CI (logicapp_ci.yaml)
+# Objetivo: validar e empacotar workflows dos Logic Apps Standard.
+#
+# Trigger: mudanças em src/LogicApp/
+# Artefatos gerados: 
+#   - orders-logic-app-package (ZIP com workflows do OrdersLogicApp)
+#   - cart-logic-app-package (ZIP com workflows do CartLogicApp)
+#
+# Nota: Logic App Standard usa o runtime do Azure Functions, mas workflows
+# são definidos em JSON (não código compilado).
+# =============================================================================
+
+trigger:
+  branches:
+    include:
+      - master
+      - development
+  paths:
+    include:
+      - src/LogicApp/**
+    exclude:
+      - "**/*.md"
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+strategy:
+  matrix:
+    Orders:
+      logicAppName: 'OrdersLogicApp'
+      logicAppPath: 'src/LogicApp/OrdersLogicApp'
+      artifactName: 'orders-logic-app-package'
+    Cart:
+      logicAppName: 'CartLogicApp'
+      logicAppPath: 'src/LogicApp/CartLogicApp'
+      artifactName: 'cart-logic-app-package'
+
+steps:
+  - task: Bash@3
+    displayName: 'Validar Estrutura do $(logicAppName)'
+    inputs:
+      targetType: 'inline'
+      script: |
+        echo "========================================="
+        echo "Validando estrutura do $(logicAppName)"
+        echo "========================================="
+        
+        # Verificar arquivos obrigatórios
+        required_files=(
+          "$(logicAppPath)/host.json"
+          "$(logicAppPath)/connections.json"
+        )
+        
+        for file in "${required_files[@]}"; do
+          if [ ! -f "$file" ]; then
+            echo "##vso[task.logissue type=error]Arquivo obrigatório não encontrado: $file"
+            exit 1
+          fi
+          echo "✓ Encontrado: $file"
+        done
+        
+        # Verificar se há workflows
+        workflow_count=$(find $(logicAppPath) -name "workflow.json" | wc -l)
+        if [ $workflow_count -eq 0 ]; then
+          echo "##vso[task.logissue type=error]Nenhum workflow encontrado em $(logicAppPath)"
+          exit 1
+        fi
+        
+        echo ""
+        echo "✓ Total de workflows encontrados: $workflow_count"
+        
+        # Listar workflows
+        echo ""
+        echo "Workflows detectados:"
+        find $(logicAppPath) -name "workflow.json" -type f | while read workflow; do
+          workflow_name=$(dirname "$workflow" | xargs basename)
+          echo "  - $workflow_name"
+        done
+        
+        echo ""
+        echo "========================================="
+        echo "✓ Validação concluída com sucesso!"
+        echo "========================================="
+
+  - task: Bash@3
+    displayName: 'Validar JSON dos Workflows'
+    inputs:
+      targetType: 'inline'
+      script: |
+        echo "========================================="
+        echo "Validando JSON dos workflows"
+        echo "========================================="
+        
+        has_errors=false
+        
+        # Validar cada workflow.json
+        find $(logicAppPath) -name "workflow.json" -type f | while read workflow; do
+          workflow_name=$(dirname "$workflow" | xargs basename)
+          echo ""
+          echo "Validando: $workflow_name"
+          
+          if jq empty "$workflow" 2>/dev/null; then
+            echo "  ✓ JSON válido"
+          else
+            echo "##vso[task.logissue type=error]JSON inválido em $workflow"
+            has_errors=true
+          fi
+        done
+        
+        # Validar connections.json
+        echo ""
+        echo "Validando: connections.json"
+        if jq empty "$(logicAppPath)/connections.json" 2>/dev/null; then
+          echo "  ✓ JSON válido"
+        else
+          echo "##vso[task.logissue type=error]JSON inválido em connections.json"
+          has_errors=true
+        fi
+        
+        # Validar host.json
+        echo ""
+        echo "Validando: host.json"
+        if jq empty "$(logicAppPath)/host.json" 2>/dev/null; then
+          echo "  ✓ JSON válido"
+        else
+          echo "##vso[task.logissue type=error]JSON inválido em host.json"
+          has_errors=true
+        fi
+        
+        if [ "$has_errors" = true ]; then
+          exit 1
+        fi
+        
+        echo ""
+        echo "========================================="
+        echo "✓ Todos os JSONs são válidos!"
+        echo "========================================="
+
+  - task: NodeTool@0
+    displayName: 'Instalar Node.js'
+    inputs:
+      versionSpec: '18.x'
+
+  - task: Npm@1
+    displayName: 'NPM Install (se houver package.json)'
+    condition: and(succeeded(), exists('$(logicAppPath)/package.json'))
+    inputs:
+      command: 'install'
+      workingDir: '$(logicAppPath)'
+
+  - task: ArchiveFiles@2
+    displayName: 'Criar pacote ZIP do $(logicAppName)'
+    inputs:
+      rootFolderOrFile: '$(logicAppPath)'
+      includeRootFolder: false
+      archiveType: 'zip'
+      archiveFile: '$(Build.ArtifactStagingDirectory)/$(artifactName).zip'
+      replaceExistingArchive: true
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publicar Artefato $(artifactName)'
+    inputs:
+      PathtoPublish: '$(Build.ArtifactStagingDirectory)/$(artifactName).zip'
+      ArtifactName: '$(artifactName)'
+      publishLocation: 'Container'
+
+  - task: Bash@3
+    displayName: 'Resumo do Build'
+    inputs:
+      targetType: 'inline'
+      script: |
+        echo ""
+        echo "========================================="
+        echo "📦 BUILD CONCLUÍDO COM SUCESSO"
+        echo "========================================="
+        echo "Logic App: $(logicAppName)"
+        echo "Artefato: $(artifactName).zip"
+        echo "Tamanho: $(du -h $(Build.ArtifactStagingDirectory)/$(artifactName).zip | cut -f1)"
+        echo "========================================="

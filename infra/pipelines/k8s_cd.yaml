@@ -1,0 +1,45 @@
+trigger: none
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  kubernetesServiceConnection: 'aksConnection'
+  namespace: 'default'
+  imageRepository: 'acr.azurecr.io/my-api'
+  tag: '$(Build.BuildId)'
+
+steps:
+  - task: Kubernetes@1
+    displayName: 'kubectl apply for Authentication API'
+    inputs:
+      connectionType: 'Kubernetes Service Connection'
+      kubernetesServiceEndpoint: '$(kubernetesServiceConnection)'
+      namespace: '$(namespace)'
+      command: apply
+      arguments: '-f infra/k8s/auth-deployment.yaml'
+  
+  - task: Kubernetes@1
+    displayName: 'kubectl apply for Products API'
+    inputs:
+      connectionType: 'Kubernetes Service Connection'
+      kubernetesServiceEndpoint: '$(kubernetesServiceConnection)'
+      namespace: '$(namespace)'
+      command: apply
+      arguments: '-f infra/k8s/products-deployment.yaml'
+  
+  - task: AzureCLI@2
+    displayName: 'Assign RBAC to AKS Managed Identity for Key Vault'
+    inputs:
+      azureSubscription: 'Azure-Connection'
+      scriptType: 'bash'
+      scriptLocation: 'inlineScript'
+      inlineScript: |
+        # Obter o principal gerenciado do AKS
+        aksIdentity=$(az aks show --name $(aksName) --resource-group $(resourceGroupName) --query identityProfile.kubeletidentity.objectId -o tsv)
+
+        # Atribuir permissão de leitura de secrets
+        az role assignment create \
+          --assignee $aksIdentity \
+          --role "Key Vault Secrets User" \
+          --scope /subscriptions/$(az account show --query id -o tsv)/resourceGroups/$(resourceGroupName)/providers/Microsoft.KeyVault/vaults/$(keyVaultName)

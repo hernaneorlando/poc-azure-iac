@@ -1,0 +1,289 @@
+# =============================================================================
+# Infrastructure Pipeline - CD (infra_cd.yaml)
+# Purpose: deploy infrastructure (incremental deployment) using template
+# produced by CI. No interactive steps. Extended timeout for initial
+# creation of APIM/AKS.
+#
+# Parameters:
+# - environment (string): target environment (dev/qa/prod). Default: dev
+# - uniqueSuffix (string): base suffix for resource naming.
+#
+# Variables:
+# - location: Azure region (e.g., brazilsouth)
+# - resourceGroupName: RG name (composed of suffix + environment)
+# - keyVaultName, logAnalyticsName, appInsightsName, aksName, apimName: default names per environment
+# - apimSku: APIM SKU (e.g., Developer)
+#
+# Input Artifact:
+# - arm-templates/main.json: produced by CI pipeline and downloaded in CD.
+# =============================================================================
+# Enables syntax validation, structure and intelligent suggestions.
+#% schema=https://aka.ms/azure-pipelines-yaml-schema
+
+trigger: none
+
+parameters:
+  - name: environment
+    displayName: "Environment"
+    type: string
+    default: "dev"
+    values:
+      - dev
+      - qa
+      - prod
+  - name: uniqueSuffix
+    displayName: "Unique Suffix"
+    type: string
+    default: "comp-poc-test" # Must be changed as needed to ensure unique names
+
+pool:
+  vmImage: "ubuntu-latest"
+
+resources:
+  pipelines:
+    - pipeline: InfraCIArtifacts
+      source: "Azure Modules - Build" # Must match exact name of your CI pipeline
+      trigger: none
+
+variables:
+  - name: location
+    value: "brazilsouth"
+  - name: resourceGroupName
+    value: "${{ parameters.uniqueSuffix }}-rg-${{ parameters.environment }}"
+  - name: keyVaultName
+    value: "${{ parameters.uniqueSuffix }}-kv-${{ parameters.environment }}"
+  - name: logAnalyticsName
+    value: "${{ parameters.uniqueSuffix }}-log-${{ parameters.environment }}"
+  - name: appInsightsName
+    value: "${{ parameters.uniqueSuffix }}-appins-${{ parameters.environment }}"
+  - name: aksName
+    value: "${{ parameters.uniqueSuffix }}-aks-${{ parameters.environment }}"
+  - name: acrName
+    value: "${{ replace(parameters.uniqueSuffix, '-', '') }}acr${{ parameters.environment }}"
+  - name: apimName
+    value: "${{ parameters.uniqueSuffix }}-apim-${{ parameters.environment }}"
+  - name: apimSku
+    value: "Developer"
+
+stages:
+  - stage: ValidateAndDeploy
+    displayName: "Validate and Deploy Infrastructure"
+    jobs:
+      - deployment: Deploy
+        environment: ${{ parameters.environment }}
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                  displayName: "Repository Checkout"
+
+                - task: Bash@3
+                  displayName: "Discover Function Apps and Logic Apps"
+                  inputs:
+                    targetType: "inline"
+                    script: |
+                      echo "====================================="
+                      echo "Discovering Function Apps in src/AzureFunctions/"
+                      echo "====================================="
+                      
+                      functionApps="[]"
+                      
+                      if [ ! -d "src/AzureFunctions" ]; then
+                        echo "##vso[task.logissue type=warning]Directory src/AzureFunctions/ not found"
+                        echo "##vso[task.setvariable variable=functionAppsJson]$functionApps"
+                      else
+                      
+                      functionCount=0
+                      
+                      # Scan each subfolder in src/AzureFunctions/
+                      for dir in src/AzureFunctions/*/; do
+                        if [ -d "$dir" ]; then
+                          dirName=$(basename "$dir")
+                          
+                          # Check if contains .csproj and host.json
+                          if ls "$dir"*.csproj 1> /dev/null 2>&1 && [ -f "$dir/host.json" ]; then
+                            echo ""
+                            echo "✓ Function App found: $dirName"
+                            
+                            # Generate normalized name (lowercase, no dots)
+                            funcNameLower=$(echo "$dirName" | tr '[:upper:]' '[:lower:]' | sed 's/\.//g')
+                            funcAppName="${{ parameters.uniqueSuffix }}-func-${funcNameLower}-${{ parameters.environment }}"
+                            
+                            # Storage account name (max 24 chars, no hyphens)
+                            storageAccName="${{ parameters.uniqueSuffix }}st${funcNameLower:0:6}${{ parameters.environment }}"
+                            storageAccName=$(echo "$storageAccName" | tr -d '-')
+                            
+                            # Detect runtime from .csproj
+                            targetFramework=$(grep -oP '(?<=<TargetFramework>)[^<]+' "$dir"*.csproj | head -1)
+                            
+                            runtime="DOTNET-ISOLATED|8.0"
+                            workerRuntime="dotnet-isolated"
+                            
+                            if [[ $targetFramework == *"net6"* ]]; then
+                              runtime="DOTNET-ISOLATED|6.0"
+                            elif [[ $targetFramework == *"net7"* ]]; then
+                              runtime="DOTNET-ISOLATED|7.0"
+                            elif [[ $targetFramework == *"net8"* ]]; then
+                              runtime="DOTNET-ISOLATED|8.0"
+                            fi
+                            
+                            # Build JSON
+                            if [ "$functionApps" == "[]" ]; then
+                              functionApps="[{\"name\":\"$funcAppName\",\"storageAccountName\":\"$storageAccName\",\"runtime\":\"$runtime\",\"workerRuntime\":\"$workerRuntime\"}]"
+                            else
+                              functionApps=$(echo "$functionApps" | sed "s/]$/,{\"name\":\"$funcAppName\",\"storageAccountName\":\"$storageAccName\",\"runtime\":\"$runtime\",\"workerRuntime\":\"$workerRuntime\"}]/")
+                            fi
+                            
+                            echo "  - Function App: $funcAppName"
+                            echo "  - Storage: $storageAccName"
+                            echo "  - Runtime: $runtime"
+                            
+                            functionCount=$((functionCount + 1))
+                          fi
+                        fi
+                      done
+                      
+                      echo ""
+                      echo "====================================="
+                      if [ $functionCount -eq 0 ]; then
+                        echo "##vso[task.logissue type=warning]No Function Apps found in src/AzureFunctions/"
+                      else
+                        echo "✓ Total: $functionCount Function App(s) detected"
+                      fi
+                      echo "====================================="
+                      echo ""
+                      echo "Function Apps JSON: $functionApps"
+                      echo "##vso[task.setvariable variable=functionAppsJson]$functionApps"
+                      fi
+                      
+                      echo ""
+                      echo "====================================="
+                      echo "Discovering Logic Apps in src/LogicApp/"
+                      echo "====================================="
+                      
+                      logicApps="[]"
+                      
+                      if [ ! -d "src/LogicApp" ]; then
+                        echo "##vso[task.logissue type=warning]Directory src/LogicApp/ not found"
+                        echo "##vso[task.setvariable variable=logicAppsJson]$logicApps"
+                        exit 0
+                      fi
+                      
+                      logicAppCount=0
+                      
+                      # Scan each subfolder in src/LogicApp/
+                      for dir in src/LogicApp/*/; do
+                        if [ -d "$dir" ]; then
+                          dirName=$(basename "$dir")
+                          
+                          # Check if contains host.json and connections.json (Logic App Standard)
+                          if [ -f "$dir/host.json" ] && [ -f "$dir/connections.json" ]; then
+                            echo ""
+                            echo "✓ Logic App found: $dirName"
+                            
+                            # Generate normalized name (lowercase, no dots)
+                            logicAppNameLower=$(echo "$dirName" | tr '[:upper:]' '[:lower:]' | sed 's/\.//g')
+                            logicAppName="${{ parameters.uniqueSuffix }}-logic-${logicAppNameLower}-${{ parameters.environment }}"
+                            
+                            # App Service Plan name
+                            appServicePlanName="${{ parameters.uniqueSuffix }}-asp-${logicAppNameLower}-${{ parameters.environment }}"
+                            
+                            # Storage account name (max 24 chars, no hyphens)
+                            storageAccName="${{ parameters.uniqueSuffix }}st${logicAppNameLower:0:6}${{ parameters.environment }}"
+                            storageAccName=$(echo "$storageAccName" | tr -d '-')
+                            
+                            # Build JSON
+                            if [ "$logicApps" == "[]" ]; then
+                              logicApps="[{\"name\":\"$logicAppName\",\"appServicePlanName\":\"$appServicePlanName\",\"storageAccountName\":\"$storageAccName\"}]"
+                            else
+                              logicApps=$(echo "$logicApps" | sed "s/]$/,{\"name\":\"$logicAppName\",\"appServicePlanName\":\"$appServicePlanName\",\"storageAccountName\":\"$storageAccName\"}]/")
+                            fi
+                            
+                            echo "  - Logic App: $logicAppName"
+                            echo "  - App Service Plan: $appServicePlanName"
+                            echo "  - Storage: $storageAccName"
+                            
+                            logicAppCount=$((logicAppCount + 1))
+                          fi
+                        fi
+                      done
+                      
+                      echo ""
+                      echo "====================================="
+                      if [ $logicAppCount -eq 0 ]; then
+                        echo "##vso[task.logissue type=warning]Nenhum Logic App encontrado em src/LogicApp/"
+                      else
+                        echo "✓ Total: $logicAppCount Logic App(s) detectado(s)"
+                      fi
+                      echo "====================================="
+                      echo ""
+                      echo "Logic Apps JSON: $logicApps"
+                      echo "##vso[task.setvariable variable=logicAppsJson]$logicApps"
+
+                - download: InfraCIArtifacts
+                  artifact: "arm-templates"
+                  displayName: "Baixar Templates ARM"
+
+                - task: AzureCLI@2
+                  displayName: "Validar existência do Resource Group"
+                  inputs:
+                    azureSubscription: "POC-Azure-Connection"
+                    scriptType: "bash"
+                    scriptLocation: "inlineScript"
+                    inlineScript: |
+                      set -euo pipefail
+                      if [ "$(az group exists --name $(resourceGroupName))" != "true" ]; then
+                        echo "Resource Group '$(resourceGroupName)' não encontrado. Crie-o previamente no Portal do Azure (veja README) e reexecute a pipeline de CD."
+                        exit 1
+                      fi
+
+
+                - task: AzureCLI@2
+                  displayName: "Implantar Infraestrutura"
+                  timeoutInMinutes: 90
+                  inputs:
+                    azureSubscription: "POC-Azure-Connection"
+                    scriptType: "bash"
+                    scriptLocation: "inlineScript"
+                    inlineScript: |
+                      set -euo pipefail
+                      templateFile="$(Pipeline.Workspace)/InfraCIArtifacts/arm-templates/main.json"
+                      deploymentName="infra-deploy-$(date +%Y%m%d-%H%M%S)"
+
+                      az deployment group create \\
+                        --name "$deploymentName" \\
+                        --resource-group "$(resourceGroupName)" \\
+                        --template-file "$templateFile" \\
+                        --parameters \\
+                          environment=${{ parameters.environment }} \\
+                          location=$(location) \\
+                          keyVaultName=$(keyVaultName) \\
+                          logAnalyticsName=$(logAnalyticsName) \\
+                          appInsightsName=$(appInsightsName) \\
+                          aksName=$(aksName) \\
+                          acrName=$(acrName) \\
+                          apimName=$(apimName) \\
+                          apimSku=$(apimSku) \\
+                          functionApps='$(functionAppsJson)' \\
+                          logicApps='$(logicAppsJson)' \\
+                        --mode Incremental
+
+                - task: AzureCLI@2
+                  displayName: "Rotular Resource Groups Relacionados"
+                  condition: succeededOrFailed()
+                  inputs:
+                    azureSubscription: "POC-Azure-Connection"
+                    scriptType: "bash"
+                    scriptLocation: "inlineScript"
+                    inlineScript: |
+                      # Tag MC_ resource group
+                      mcRG="MC_$(resourceGroupName)_$(aksName)_$(location)"
+                      if [ $(az group exists --name "$mcRG") = true ]; then
+                        az group update \
+                          --name "$mcRG" \
+                          --set tags.environment=${{ parameters.environment }} \
+                          --set tags.managedBy=AKS \
+                          --set tags.mainResourceGroup=$(resourceGroupName)
+                      fi
+

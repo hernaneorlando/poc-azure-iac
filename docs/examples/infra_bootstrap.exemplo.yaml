@@ -1,0 +1,98 @@
+# Pipeline Bootstrap: registro de providers, criação de RG e (opcional) concessão de RBAC pontual
+# Não utilizar nesta POC; mantido apenas como referência futura
+#% schema=https://aka.ms/azure-pipelines-yaml-schema
+
+trigger: none
+
+parameters:
+  - name: environment
+    type: string
+    default: dev
+    values: [dev, qa, prod]
+  - name: uniqueSuffix
+    type: string
+    default: comp-poc-test
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - name: location
+    value: brazilsouth
+  - name: resourceGroupName
+    value: ${{ parameters.uniqueSuffix }}-rg-${{ parameters.environment }}
+  - name: aksName
+    value: ${{ parameters.uniqueSuffix }}-aks-${{ parameters.environment }}
+  - name: keyVaultName
+    value: ${{ parameters.uniqueSuffix }}-kv-${{ parameters.environment }}
+
+stages:
+- stage: Bootstrap
+  displayName: One-time platform setup (providers, RG, optional RBAC)
+  jobs:
+  - job: BootstrapOps
+    steps:
+    # ATENÇÃO: use aqui uma Service Connection com privilégios elevados (Owner/UA Admin no escopo mínimo necessário)
+    # Renomeie "POC-Azure-Connection-Privileged" conforme o nome real da sua conexão privilegiada
+    - task: AzureCLI@2
+      displayName: Registrar provedores (uma vez)
+      inputs:
+        azureSubscription: POC-Azure-Connection-Privileged
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -euo pipefail
+          providers=(
+            "Microsoft.OperationalInsights"
+            "Microsoft.ContainerService"
+            "Microsoft.ApiManagement"
+            "Microsoft.KeyVault"
+            "Microsoft.Insights"
+            "Microsoft.AlertsManagement"
+          )
+          for p in "${providers[@]}"; do
+            echo "Registering $p"
+            az provider register --namespace "$p"
+            # Espera ativa até registrar
+            while [ "$(az provider show --namespace "$p" --query registrationState -o tsv)" != "Registered" ]; do
+              echo "Waiting for $p registration..."; sleep 5
+            done
+          done
+
+    - task: AzureCLI@2
+      displayName: Criar Resource Group (baseline)
+      inputs:
+        azureSubscription: POC-Azure-Connection-Privileged
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          set -euo pipefail
+          az group create \
+            --name $(resourceGroupName) \
+            --location $(location) \
+            --tags environment=${{ parameters.environment }} platform=bootstrap
+
+    # Opcional: conceder acesso do kubelet identity do AKS ao Key Vault (execute após o AKS existir)
+    - task: AzureCLI@2
+      displayName: Conceder ao kubelet do AKS a role "Key Vault Secrets User" (opcional)
+      inputs:
+        azureSubscription: POC-Azure-Connection-Privileged
+        scriptType: bash
+        scriptLocation: inlineScript
+        continueOnError: true
+        inlineScript: |
+          set -euo pipefail
+          # Tenta obter a identidade do kubelet; se não existir, apenas registra aviso
+          if aksIdentity=$(az aks show --name $(aksName) --resource-group $(resourceGroupName) --query identityProfile.kubeletidentity.objectId -o tsv 2>/dev/null); then
+            kvScope="/subscriptions/$(az account show --query id -o tsv)/resourceGroups/$(resourceGroupName)/providers/Microsoft.KeyVault/vaults/$(keyVaultName)"
+            echo "Assigning 'Key Vault Secrets User' to kubelet identity: $aksIdentity"
+            az role assignment create \
+              --assignee-object-id "$aksIdentity" \
+              --role "Key Vault Secrets User" \
+              --scope "$kvScope" || true
+          else
+            echo "AKS not found yet. Re-run this step after AKS is created."
+          fi
+
+    # NOTA: atribuições de RBAC à Service Connection de CD (Contributor no RG) devem ser feitas previamente
+    # fora do pipeline ou aqui, se preferir, desde que você saiba o principalId da conexão.

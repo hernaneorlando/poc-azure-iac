@@ -1,0 +1,264 @@
+# =============================================================================
+# Infrastructure Pipeline - CI (infra_ci.yaml)
+# Purpose: validate templates (Build/Validate), run What-If and publish
+# the generated ARM template. Does not apply changes to production (read-only).
+#
+# Parameters:
+# - environment (string): target environment (dev/qa/prod). Default: dev
+# - uniqueSuffix (string): base suffix for resource naming.
+#
+# Variables:
+# - location: Azure region (e.g., brazilsouth)
+# - resourceGroupName: RG name (composed of suffix + environment)
+# - keyVaultName, logAnalyticsName, appInsightsName, aksName, apimName: default names per environment
+# - apimSku: APIM SKU (e.g., Developer)
+#
+# Best Practices:
+# - Authentication via Service Connection (WIF), scope on RG, Contributor role.
+# - Resource Group validation at start (fails with guidance message).
+# - What-If here; CD only deploys (Incremental mode).
+# =============================================================================
+# Enables syntax validation, structure and intelligent suggestions.
+#% schema=https://aka.ms/azure-pipelines-yaml-schema
+
+trigger:
+  branches:
+    include:
+      - master
+      - development
+  paths:
+    include:
+      - infra/*
+    exclude:
+      - "**/*.md"
+      - "**/README.md"
+
+parameters:
+  - name: environment
+    displayName: "Environment"
+    type: string
+    default: "dev"
+    values:
+      - dev
+      - qa
+      - prod
+  - name: uniqueSuffix
+    displayName: "Unique Suffix"
+    type: string
+    default: "comp-poc-test" # Must be changed as needed to ensure unique names
+
+pool:
+  vmImage: "ubuntu-latest"
+
+variables:
+  - name: location
+    value: "brazilsouth"
+  - name: resourceGroupName
+    value: "${{ parameters.uniqueSuffix }}-rg-${{ parameters.environment }}"
+  - name: keyVaultName
+    value: "${{ parameters.uniqueSuffix }}-kv-${{ parameters.environment }}"
+  - name: logAnalyticsName
+    value: "${{ parameters.uniqueSuffix }}-log-${{ parameters.environment }}"
+  - name: appInsightsName
+    value: "${{ parameters.uniqueSuffix }}-appins-${{ parameters.environment }}"
+  - name: aksName
+    value: "${{ parameters.uniqueSuffix }}-aks-${{ parameters.environment }}"
+  - name: acrName
+    value: "${{ replace(parameters.uniqueSuffix, '-', '') }}acr${{ parameters.environment }}"
+  - name: apimName
+    value: "${{ parameters.uniqueSuffix }}-apim-${{ parameters.environment }}"
+  - name: apimSku
+    value: "Developer"
+
+steps:
+  - task: Bash@3
+    displayName: "Discover Function Apps in src/AzureFunctions/"
+    inputs:
+      targetType: "inline"
+      script: |
+        echo "====================================="
+        echo "Discovering Function Apps in src/AzureFunctions/"
+        echo "====================================="
+        
+        functionApps="[]"
+        
+        if [ ! -d "src/AzureFunctions" ]; then
+          echo "##vso[task.logissue type=warning]Directory src/AzureFunctions/ not found"
+          echo "##vso[task.setvariable variable=functionAppsJson]$functionApps"
+          exit 0
+        fi
+        
+        functionCount=0
+        
+        # Scan each subfolder in src/AzureFunctions/
+        for dir in src/AzureFunctions/*/; do
+          if [ -d "$dir" ]; then
+            dirName=$(basename "$dir")
+            
+            # Check if contains .csproj and host.json
+            if ls "$dir"*.csproj 1> /dev/null 2>&1 && [ -f "$dir/host.json" ]; then
+              echo ""
+              echo "✓ Function App found: $dirName"
+              
+              # Generate normalized name (lowercase, no dots)
+              funcNameLower=$(echo "$dirName" | tr '[:upper:]' '[:lower:]' | sed 's/\.//g')
+              funcAppName="${{ parameters.uniqueSuffix }}-func-${funcNameLower}-${{ parameters.environment }}"
+              
+              # Storage account name (max 24 chars, no hyphens)
+              # Take up to 6 chars from function name to avoid exceeding limit
+              storageAccName="${{ parameters.uniqueSuffix }}st${funcNameLower:0:6}${{ parameters.environment }}"
+              storageAccName=$(echo "$storageAccName" | tr -d '-')
+              
+              # Detect runtime from .csproj
+              targetFramework=$(grep -oP '(?<=<TargetFramework>)[^<]+' "$dir"*.csproj | head -1)
+              
+              runtime="DOTNET-ISOLATED|8.0"
+              workerRuntime="dotnet-isolated"
+              
+              if [[ $targetFramework == *"net6"* ]]; then
+                runtime="DOTNET-ISOLATED|6.0"
+              elif [[ $targetFramework == *"net7"* ]]; then
+                runtime="DOTNET-ISOLATED|7.0"
+              elif [[ $targetFramework == *"net8"* ]]; then
+                runtime="DOTNET-ISOLATED|8.0"
+              fi
+              
+              # Build JSON
+              if [ "$functionApps" == "[]" ]; then
+                functionApps="[{\"name\":\"$funcAppName\",\"storageAccountName\":\"$storageAccName\",\"runtime\":\"$runtime\",\"workerRuntime\":\"$workerRuntime\"}]"
+              else
+                functionApps=$(echo "$functionApps" | sed "s/]$/,{\"name\":\"$funcAppName\",\"storageAccountName\":\"$storageAccName\",\"runtime\":\"$runtime\",\"workerRuntime\":\"$workerRuntime\"}]/")
+              fi
+              
+              echo "  - Function App: $funcAppName"
+              echo "  - Storage: $storageAccName"
+              echo "  - Runtime: $runtime"
+              
+              functionCount=$((functionCount + 1))
+            fi
+          fi
+        done
+        
+        echo ""
+        echo "====================================="
+        if [ $functionCount -eq 0 ]; then
+          echo "##vso[task.logissue type=warning]No Function Apps found in src/AzureFunctions/"
+        else
+          echo "✓ Total: $functionCount Function App(s) detected"
+        fi
+        echo "====================================="
+        echo ""
+        echo "Function Apps JSON: $functionApps"
+        echo "##vso[task.setvariable variable=functionAppsJson]$functionApps"
+
+  - task: AzureCLI@2
+    displayName: "Validate Resource Group existence"
+    inputs:
+      azureSubscription: "POC-Azure-Connection"
+      scriptType: "bash"
+      scriptLocation: "inlineScript"
+      inlineScript: |
+        set -euo pipefail
+        if [ "$(az group exists --name $(resourceGroupName))" != "true" ]; then
+          echo "Resource Group '$(resourceGroupName)' not found. Create it first in Azure Portal (see README) and rerun the CI pipeline."
+          exit 1
+        fi
+
+  - task: AzureCLI@2
+    displayName: "Instalar Bicep CLI"
+    inputs:
+      azureSubscription: "POC-Azure-Connection"
+      scriptType: "bash"
+      scriptLocation: "inlineScript"
+      inlineScript: |
+        az bicep install
+        az bicep version
+
+  - task: AzureCLI@2
+    displayName: "Validate Main Bicep Template"
+    inputs:
+      azureSubscription: "POC-Azure-Connection"
+      scriptType: "bash"
+      scriptLocation: "inlineScript"
+      inlineScript: |
+        # First, compile template to ARM
+        echo "Compiling Bicep template to ARM..."
+        tempFile=$(mktemp)
+        az bicep build --file infra/main.bicep --outfile $tempFile
+
+        # Then, validate ARM template
+        echo "Validating ARM template..."
+        az deployment group validate \
+          --resource-group $(resourceGroupName) \
+          --template-file $tempFile \
+          --parameters \
+            environment=${{ parameters.environment }} \
+            location=$(location) \
+            keyVaultName=$(keyVaultName) \
+            logAnalyticsName=$(logAnalyticsName) \
+            appInsightsName=$(appInsightsName) \
+            aksName=$(aksName) \
+            acrName=$(acrName) \
+            apimName=$(apimName) \
+            apimSku=$(apimSku) \
+            functionApps='$(functionAppsJson)' \
+          --output json > validation.json
+
+        # Verificar o resultado da validação
+        if [ -f validation.json ]; then
+          if jq -e '.error' validation.json > /dev/null; then
+            echo "Erro na validação:"
+            jq '.error' validation.json
+            exit 1
+          else
+            echo "Validação concluída com sucesso!"
+          fi
+        else
+          echo "Erro: Arquivo de validação não foi criado"
+          exit 1
+        fi
+
+        # Limpar arquivos temporários
+        rm -f $tempFile validation.json
+
+
+  - task: AzureCLI@2
+    displayName: "Pré-visualizar Mudanças (What-If)"
+    inputs:
+      azureSubscription: "POC-Azure-Connection"
+      scriptType: "bash"
+      scriptLocation: "inlineScript"
+      inlineScript: |
+        set -euo pipefail
+        az deployment group what-if \
+          --resource-group $(resourceGroupName) \
+          --template-file infra/main.bicep \
+          --parameters \
+            environment=${{ parameters.environment }} \
+            location=$(location) \
+            keyVaultName=$(keyVaultName) \
+            logAnalyticsName=$(logAnalyticsName) \
+            appInsightsName=$(appInsightsName) \
+            aksName=$(aksName) \
+            acrName=$(acrName) \
+            apimName=$(apimName) \
+            apimSku=$(apimSku) \
+            functionApps='$(functionAppsJson)' \
+          --output none
+
+  - task: AzureCLI@2
+    displayName: "Gerar Template ARM"
+    inputs:
+      azureSubscription: "POC-Azure-Connection"
+      scriptType: "bash"
+      scriptLocation: "inlineScript"
+      inlineScript: |
+        #mkdir -p $(Build.ArtifactStagingDirectory)/arm
+        az bicep build --file infra/main.bicep --outfile $(Build.ArtifactStagingDirectory)/main.json
+
+  - task: PublishBuildArtifacts@1
+    displayName: "Publicar Artefatos de Build"
+    inputs:
+      PathtoPublish: "$(Build.ArtifactStagingDirectory)"
+      ArtifactName: "arm-templates"
+      publishLocation: "Container"

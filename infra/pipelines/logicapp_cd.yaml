@@ -1,0 +1,364 @@
+# =============================================================================
+# Pipeline Logic App - CD (logicapp_cd.yaml)
+# Objetivo: fazer deploy dos Logic Apps Standard no Azure.
+#
+# Trigger: manual
+# Artefatos consumidos: orders-logic-app-package e cart-logic-app-package
+#
+# Pré-requisitos:
+# - Logic Apps Standard criados pela infraestrutura (infra_cd.yaml)
+# - Service Connection configurada (POC-Azure-Connection)
+# =============================================================================
+
+trigger: none
+
+parameters:
+  - name: environment
+    displayName: "Environment"
+    type: string
+    default: "dev"
+    values:
+      - dev
+      - qa
+      - prod
+  - name: uniqueSuffix
+    displayName: "Unique Suffix"
+    type: string
+    default: "comp-poc-test"
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  - name: resourceGroupName
+    value: "${{ parameters.uniqueSuffix }}-rg-${{ parameters.environment }}"
+
+resources:
+  pipelines:
+    - pipeline: LogicAppCIArtifacts
+      source: "Logic App - Build" # Nome da pipeline CI no Azure DevOps
+      trigger: none
+
+stages:
+  - stage: DiscoverLogicApps
+    displayName: "Discover Logic Apps"
+    jobs:
+      - job: Discover
+        displayName: "Descobrir Logic Apps"
+        steps:
+          - checkout: self
+
+          - task: Bash@3
+            name: DiscoveryTask
+            displayName: "Descobrir Logic Apps em src/LogicApp/"
+            inputs:
+              targetType: "inline"
+              script: |
+                echo "====================================="
+                echo "Descobrindo Logic Apps"
+                echo "====================================="
+                
+                logicApps="[]"
+                
+                if [ ! -d "src/LogicApp" ]; then
+                  echo "##vso[task.logissue type=error]Diretório src/LogicApp/ não encontrado"
+                  exit 1
+                fi
+                
+                logicAppCount=0
+                
+                # Varrer cada subpasta em src/LogicApp/
+                for dir in src/LogicApp/*/; do
+                  if [ -d "$dir" ]; then
+                    dirName=$(basename "$dir")
+                    
+                    # Verificar se contém host.json e connections.json
+                    if [ -f "$dir/host.json" ] && [ -f "$dir/connections.json" ]; then
+                      echo ""
+                      echo "✓ Logic App encontrado: $dirName"
+                      
+                      # Gerar nome normalizado
+                      logicAppNameLower=$(echo "$dirName" | tr '[:upper:]' '[:lower:]' | sed 's/\.//g')
+                      logicAppName="${{ parameters.uniqueSuffix }}-logic-${logicAppNameLower}-${{ parameters.environment }}"
+                      artifactName="${logicAppNameLower}-logic-app-package"
+                      
+                      echo "  - Logic App: $logicAppName"
+                      echo "  - Artifact: $artifactName"
+                      
+                      # Construir JSON array
+                      if [ "$logicApps" == "[]" ]; then
+                        logicApps="[{\"name\":\"$logicAppName\",\"artifact\":\"$artifactName\"}]"
+                      else
+                        logicApps=$(echo "$logicApps" | sed "s/]$/,{\"name\":\"$logicAppName\",\"artifact\":\"$artifactName\"}]/")
+                      fi
+                      
+                      logicAppCount=$((logicAppCount + 1))
+                    fi
+                  fi
+                done
+                
+                if [ $logicAppCount -eq 0 ]; then
+                  echo "##vso[task.logissue type=error]Nenhum Logic App encontrado"
+                  exit 1
+                fi
+                
+                echo ""
+                echo "====================================="
+                echo "✓ Total: $logicAppCount Logic App(s)"
+                echo "====================================="
+                echo ""
+                echo "Logic Apps JSON: $logicApps"
+                
+                # Set output variable for next stage
+                echo "##vso[task.setvariable variable=logicAppsJson;isOutput=true]$logicApps"
+
+  - stage: DeployLogicApps
+    displayName: "Deploy Logic Apps"
+    dependsOn: DiscoverLogicApps
+    variables:
+      logicAppsJson: $[ stageDependencies.DiscoverLogicApps.Discover.outputs['DiscoveryTask.logicAppsJson'] ]
+    jobs:
+      - job: ParseLogicApps
+        displayName: "Parse Logic Apps"
+        steps:
+          - checkout: none
+          
+          - task: Bash@3
+            name: ParseTask
+            displayName: "Parse Logic Apps JSON"
+            inputs:
+              targetType: "inline"
+              script: |
+                echo "Logic Apps JSON: $(logicAppsJson)"
+                
+                # Parse JSON and extract names and artifacts
+                logicAppNames=$(echo '$(logicAppsJson)' | jq -r '.[].name' | paste -sd ',' -)
+                logicAppArtifacts=$(echo '$(logicAppsJson)' | jq -r '.[].artifact' | paste -sd ',' -)
+                
+                echo "##vso[task.setvariable variable=logicAppNames;isOutput=true]$logicAppNames"
+                echo "##vso[task.setvariable variable=logicAppArtifacts;isOutput=true]$logicAppArtifacts"
+
+      - deployment: DeployOrdersLogicApp
+        displayName: "Deploy Orders Logic App"
+        dependsOn: ParseLogicApps
+        environment: ${{ parameters.environment }}
+        variables:
+          logicAppName: "${{ parameters.uniqueSuffix }}-logic-orderslogicapp-${{ parameters.environment }}"
+          artifactName: "orders-logic-app-package"
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: none
+
+                - download: LogicAppCIArtifacts
+                  artifact: $(artifactName)
+                  displayName: "Baixar Pacote Orders Logic App"
+
+                - task: Bash@3
+                  displayName: "Verificar Artefato Orders"
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      echo "========================================="
+                      echo "Verificando artefato Orders Logic App"
+                      echo "========================================="
+                      
+                      artifact_path="$(Pipeline.Workspace)/LogicAppCIArtifacts/$(artifactName)/$(artifactName).zip"
+                      
+                      if [ ! -f "$artifact_path" ]; then
+                        echo "##vso[task.logissue type=error]Artefato não encontrado: $artifact_path"
+                        exit 1
+                      fi
+                      
+                      echo "✓ Artefato encontrado"
+                      echo "  Path: $artifact_path"
+                      echo "  Size: $(du -h $artifact_path | cut -f1)"
+                      
+                      echo ""
+                      echo "Conteúdo do pacote:"
+                      unzip -l "$artifact_path" | head -20
+                      echo "========================================="
+
+                - task: AzureCLI@2
+                  displayName: "Verificar Orders Logic App Existe"
+                  inputs:
+                    azureSubscription: "POC-Azure-Connection"
+                    scriptType: "bash"
+                    scriptLocation: "inlineScript"
+                    inlineScript: |
+                      echo "========================================="
+                      echo "Verificando Orders Logic App no Azure"
+                      echo "========================================="
+                      
+                      logic_app_exists=$(az logicapp show \
+                        --name $(logicAppName) \
+                        --resource-group $(resourceGroupName) \
+                        --query "name" -o tsv 2>/dev/null || echo "")
+                      
+                      if [ -z "$logic_app_exists" ]; then
+                        echo "##vso[task.logissue type=error]Logic App '$(logicAppName)' não encontrado"
+                        echo "⚠️  Execute: infra_ci.yaml -> infra_cd.yaml"
+                        exit 1
+                      fi
+                      
+                      echo "✓ Logic App encontrado: $(logicAppName)"
+                      az logicapp show \
+                        --name $(logicAppName) \
+                        --resource-group $(resourceGroupName) \
+                        --query "{Name: name, State: state, Location: location}" \
+                        -o table
+                      echo "========================================="
+
+                - task: AzureFunctionApp@2
+                  displayName: "Deploy Orders Logic App"
+                  inputs:
+                    azureSubscription: "POC-Azure-Connection"
+                    appType: "functionApp"
+                    appName: "$(logicAppName)"
+                    package: "$(Pipeline.Workspace)/LogicAppCIArtifacts/$(artifactName)/$(artifactName).zip"
+                    deploymentMethod: "zipDeploy"
+
+                - task: AzureCLI@2
+                  displayName: "Verificar Deploy Orders e Callbacks"
+                  inputs:
+                    azureSubscription: "POC-Azure-Connection"
+                    scriptType: "bash"
+                    scriptLocation: "inlineScript"
+                    inlineScript: |
+                      echo "Aguardando propagação..."
+                      sleep 10
+                      
+                      echo "Workflows Orders Logic App:"
+                      az logicapp workflow list \
+                        --resource-group $(resourceGroupName) \
+                        --name $(logicAppName) \
+                        --query "[].{Name: name, State: properties.state}" \
+                        -o table
+
+      - deployment: DeployCartLogicApp
+        displayName: "Deploy Cart Logic App"
+        dependsOn: [ParseLogicApps, DeployOrdersLogicApp]
+        environment: ${{ parameters.environment }}
+        variables:
+          logicAppName: "${{ parameters.uniqueSuffix }}-logic-cartlogicapp-${{ parameters.environment }}"
+          artifactName: "cart-logic-app-package"
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: none
+
+                - download: LogicAppCIArtifacts
+                  artifact: $(artifactName)
+                  displayName: "Baixar Pacote Cart Logic App"
+
+                - task: Bash@3
+                  displayName: "Verificar Artefato Cart"
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      echo "========================================="
+                      echo "Verificando artefato Cart Logic App"
+                      echo "========================================="
+                      
+                      artifact_path="$(Pipeline.Workspace)/LogicAppCIArtifacts/$(artifactName)/$(artifactName).zip"
+                      
+                      if [ ! -f "$artifact_path" ]; then
+                        echo "##vso[task.logissue type=error]Artefato não encontrado: $artifact_path"
+                        exit 1
+                      fi
+                      
+                      echo "✓ Artefato encontrado"
+                      echo "  Path: $artifact_path"
+                      echo "  Size: $(du -h $artifact_path | cut -f1)"
+                      
+                      echo ""
+                      echo "Conteúdo do pacote:"
+                      unzip -l "$artifact_path" | head -20
+                      echo "========================================="
+
+                - task: AzureCLI@2
+                  displayName: "Verificar Cart Logic App Existe"
+                  inputs:
+                    azureSubscription: "POC-Azure-Connection"
+                    scriptType: "bash"
+                    scriptLocation: "inlineScript"
+                    inlineScript: |
+                      echo "========================================="
+                      echo "Verificando Cart Logic App no Azure"
+                      echo "========================================="
+                      
+                      logic_app_exists=$(az logicapp show \
+                        --name $(logicAppName) \
+                        --resource-group $(resourceGroupName) \
+                        --query "name" -o tsv 2>/dev/null || echo "")
+                      
+                      if [ -z "$logic_app_exists" ]; then
+                        echo "##vso[task.logissue type=error]Logic App '$(logicAppName)' não encontrado"
+                        echo "⚠️  Execute: infra_ci.yaml -> infra_cd.yaml"
+                        exit 1
+                      fi
+                      
+                      echo "✓ Logic App encontrado: $(logicAppName)"
+                      az logicapp show \
+                        --name $(logicAppName) \
+                        --resource-group $(resourceGroupName) \
+                        --query "{Name: name, State: state, Location: location}" \
+                        -o table
+                      echo "========================================="
+
+                - task: AzureFunctionApp@2
+                  displayName: "Deploy Cart Logic App"
+                  inputs:
+                    azureSubscription: "POC-Azure-Connection"
+                    appType: "functionApp"
+                    appName: "$(logicAppName)"
+                    package: "$(Pipeline.Workspace)/LogicAppCIArtifacts/$(artifactName)/$(artifactName).zip"
+                    deploymentMethod: "zipDeploy"
+
+                - task: AzureCLI@2
+                  displayName: "Verificar Deploy Cart e Callbacks"
+                  inputs:
+                    azureSubscription: "POC-Azure-Connection"
+                    scriptType: "bash"
+                    scriptLocation: "inlineScript"
+                    inlineScript: |
+                      echo "Aguardando propagação..."
+                      sleep 10
+                      
+                      echo "Workflows Cart Logic App:"
+                      az logicapp workflow list \
+                        --resource-group $(resourceGroupName) \
+                        --name $(logicAppName) \
+                        --query "[].{Name: name, State: properties.state}" \
+                        -o table
+
+      - job: Summary
+        displayName: "Deployment Summary"
+        dependsOn: [DeployOrdersLogicApp, DeployCartLogicApp]
+        steps:
+          - checkout: none
+          
+          - task: Bash@3
+            displayName: "Resumo Final"
+            inputs:
+              targetType: 'inline'
+              script: |
+                echo ""
+                echo "========================================="
+                echo "✅ TODOS OS LOGIC APPS IMPLANTADOS"
+                echo "========================================="
+                echo "Resource Group: $(resourceGroupName)"
+                echo "Environment: ${{ parameters.environment }}"
+                echo ""
+                echo "Logic Apps implantados:"
+                echo "  • ${{ parameters.uniqueSuffix }}-logic-orderslogicapp-${{ parameters.environment }}"
+                echo "  • ${{ parameters.uniqueSuffix }}-logic-cartlogicapp-${{ parameters.environment }}"
+                echo ""
+                echo "Próximos passos:"
+                echo "1. Acesse o portal Azure para visualizar workflows"
+                echo "2. Configure connections (se necessário)"
+                echo "3. Teste os workflows"
+                echo "4. Integre no APIM"
+                echo "========================================="

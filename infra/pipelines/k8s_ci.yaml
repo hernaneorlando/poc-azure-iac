@@ -1,0 +1,54 @@
+trigger:
+  branches:
+    include:
+      - master
+      - development
+  paths:
+    include:
+      - src/AKS/**
+    exclude:
+      - "**/*.md"
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+# CONFIGURAÇÃO DO DOCKER REGISTRY:
+# Antes de habilitar o build Docker, você precisa criar uma Service Connection:
+# Opção 1 (Docker Hub): Criar service connection 'dockerConnection' para Docker Hub
+# Opção 2 (ACR): Criar ACR no Azure e service connection para ele
+# Opção 3: Manter apenas build/test .NET (comente a seção Docker@2 abaixo)
+
+# variables:
+#   # Descomente e configure após criar service connection:
+#   dockerRegistryServiceConnection: 'dockerConnection'  # Nome da sua service connection
+#   imageRepository: 'seudockerhub/auth-api'  # Para Docker Hub
+#   # imageRepository: 'compoctestacr.azurecr.io/auth-api'  # Para ACR
+#   tag: '$(Build.BuildId)'
+
+steps:
+  - task: DotNetCoreCLI@2
+    displayName: 'Restore'
+    inputs:
+      command: 'restore'
+      projects: '**/*.csproj'
+
+  - task: DotNetCoreCLI@2
+    displayName: 'Build'
+    inputs:
+      command: 'build'
+      projects: '**/*.csproj'
+
+  - task: DotNetCoreCLI@2
+    displayName: 'Test'
+    inputs:
+      command: 'test'
+      projects: '**/*.csproj'
+
+  # DOCKER BUILD & PUSH - Descomente após configurar service connection:
+  # - task: Docker@2
+  #   displayName: 'Build and Push Docker Image'
+  #   inputs:
+  #     containerRegistry: '$(dockerRegistryServiceConnection)'
+  #     repository: '$(imageRepository)'
+  #     command: 'buildAndPush'
+  #     tags: '$(tag)'

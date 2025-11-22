@@ -1,0 +1,159 @@
+# =============================================================================
+# Pipeline de Function App - CI (function_ci.yaml)
+# Objetivo: compilar, testar e publicar TODAS as Azure Function Apps (.NET)
+# encontradas em src/ como artefatos para uso no CD.
+#
+# Parâmetros:
+# - buildConfiguration (string): configuração de build (Debug/Release)
+#
+# Etapas:
+# 1. Descobrir automaticamente todas as Functions em src/
+# 2. Para cada Function: Restaurar, Compilar, Testar, Publicar
+# 3. Gerar artefatos separados por Function App
+#
+# Trigger: mudanças em src/*Function*
+# =============================================================================
+#% schema=https://aka.ms/azure-pipelines-yaml-schema
+
+trigger:
+  branches:
+    include:
+      - master
+      - development
+  paths:
+    include:
+      - src/AzureFunctions/**
+    exclude:
+      - "**/*.md"
+
+parameters:
+  - name: buildConfiguration
+    displayName: "Build Configuration"
+    type: string
+    default: "Release"
+    values:
+      - Debug
+      - Release
+
+pool:
+  vmImage: "ubuntu-latest"
+
+variables:
+  buildConfiguration: ${{ parameters.buildConfiguration }}
+
+steps:
+  - task: UseDotNet@2
+    displayName: "Instalar .NET SDK"
+    inputs:
+      packageType: "sdk"
+      version: "8.x"
+      installationPath: $(Agent.ToolsDirectory)/dotnet
+
+  - task: Bash@3
+    displayName: "Descobrir e Compilar Function Apps"
+    inputs:
+      targetType: "inline"
+      script: |
+        echo "====================================="
+        echo "Compilando Function Apps em src/AzureFunctions/"
+        echo "====================================="
+        
+        if [ ! -d "src/AzureFunctions" ]; then
+          echo "##vso[task.logissue type=error]Diretório src/AzureFunctions/ não encontrado"
+          exit 1
+        fi
+        
+        functionCount=0
+        failCount=0
+        
+        for dir in src/AzureFunctions/*/; do
+          if [ -d "$dir" ]; then
+            dirName=$(basename "$dir")
+            
+            # Verificar se contém um .csproj E host.json (indica Azure Function)
+            if ls "$dir"*.csproj 1> /dev/null 2>&1 && [ -f "$dir/host.json" ]; then
+              echo ""
+              echo "====================================="
+              echo "✓ Function App encontrada: $dirName"
+              echo "====================================="
+              
+              projectFile=$(ls "$dir"*.csproj | head -1)
+              funcNameLower=$(echo "$dirName" | tr '[:upper:]' '[:lower:]' | sed 's/\.//g')
+              
+              echo "Projeto: $projectFile"
+              echo "Nome normalizado: $funcNameLower"
+              
+              # Restaurar dependências
+              echo ""
+              echo "[1/4] Restaurando dependências..."
+              if ! dotnet restore "$projectFile"; then
+                echo "##vso[task.logissue type=error]Falha ao restaurar $dirName"
+                failCount=$((failCount + 1))
+                continue
+              fi
+              
+              # Build
+              echo ""
+              echo "[2/4] Compilando..."
+              if ! dotnet build "$projectFile" --configuration $(buildConfiguration) --no-restore; then
+                echo "##vso[task.logissue type=error]Falha ao compilar $dirName"
+                failCount=$((failCount + 1))
+                continue
+              fi
+              
+              # Publish
+              echo ""
+              echo "[3/4] Publicando..."
+              outputDir="$(Build.ArtifactStagingDirectory)/functions/$funcNameLower"
+              if ! dotnet publish "$projectFile" --configuration $(buildConfiguration) --output "$outputDir" --no-build; then
+                echo "##vso[task.logissue type=error]Falha ao publicar $dirName"
+                failCount=$((failCount + 1))
+                continue
+              fi
+              
+              # Criar ZIP
+              echo ""
+              echo "[4/4] Criando ZIP..."
+              cd "$outputDir"
+              zip -r "../../$funcNameLower.zip" .
+              cd - > /dev/null
+              
+              echo ""
+              echo "✓ Function App $dirName compilada e empacotada com sucesso!"
+              
+              functionCount=$((functionCount + 1))
+            fi
+          fi
+        done
+        
+        echo ""
+        echo "====================================="
+        echo "Resumo da Compilação"
+        echo "====================================="
+        echo "Sucesso: $functionCount"
+        echo "Falhas: $failCount"
+        
+        if [ $functionCount -eq 0 ]; then
+          echo "##vso[task.logissue type=error]Nenhuma Function App foi compilada"
+          exit 1
+        fi
+        
+        if [ $failCount -gt 0 ]; then
+          echo "##vso[task.logissue type=warning]Algumas Function Apps falharam na compilação"
+        fi
+
+  - task: DotNetCoreCLI@2
+    displayName: "Executar Testes Unitários"
+    condition: ne(variables['Build.Reason'], 'PullRequest')
+    continueOnError: true
+    inputs:
+      command: "test"
+      projects: "**/*Tests/*.csproj"
+      arguments: "--configuration $(buildConfiguration)"
+
+  - task: PublishBuildArtifacts@1
+    displayName: "Publicar Artefatos das Functions"
+    inputs:
+      PathtoPublish: "$(Build.ArtifactStagingDirectory)"
+      ArtifactName: "function-apps"
+      publishLocation: "Container"

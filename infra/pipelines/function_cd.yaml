@@ -1,0 +1,154 @@
+# =============================================================================
+# Pipeline de Function App - CD (function_cd.yaml)
+# Objetivo: implantar o código de TODAS as Azure Function Apps no Azure usando
+# os artefatos gerados pela pipeline de CI.
+#
+# Parâmetros:
+# - environment (string): ambiente alvo (dev/qa/prod)
+# - uniqueSuffix (string): sufixo base para nomenclatura de recursos
+#
+# Pré-requisitos:
+# - A infraestrutura (Function Apps) deve ter sido criada pelo infra_cd.yaml
+# - A pipeline de CI (function_ci.yaml) deve ter rodado e gerado os artefatos
+#
+# Artefato de entrada:
+# - function-apps/*.zip: código compilado de cada Function App
+# =============================================================================
+#% schema=https://aka.ms/azure-pipelines-yaml-schema
+
+trigger: none
+
+parameters:
+  - name: environment
+    displayName: "Environment"
+    type: string
+    default: "dev"
+    values:
+      - dev
+      - qa
+      - prod
+  - name: uniqueSuffix
+    displayName: "Unique Suffix"
+    type: string
+    default: "comp-poc-test" # Deve corresponder ao usado nas pipelines de infraestrutura
+
+pool:
+  vmImage: "ubuntu-latest"
+
+resources:
+  pipelines:
+    - pipeline: FunctionCIArtifacts
+      source: "Azure Function - Build" # Deve corresponder ao nome exato da sua pipeline de CI da Function
+      trigger: none
+
+variables:
+  - name: resourceGroupName
+    value: "${{ parameters.uniqueSuffix }}-rg-${{ parameters.environment }}"
+
+stages:
+  - stage: DeployFunction
+    displayName: "Deploy Function App"
+    jobs:
+      - deployment: Deploy
+        environment: ${{ parameters.environment }}
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - download: FunctionCIArtifacts
+                  artifact: "function-apps"
+                  displayName: "Baixar Artefatos das Functions"
+
+                - task: AzureCLI@2
+                  displayName: "Deploy de Todas as Function Apps"
+                  inputs:
+                    azureSubscription: "POC-Azure-Connection"
+                    scriptType: "bash"
+                    scriptLocation: "inlineScript"
+                    inlineScript: |
+                      echo "====================================="
+                      echo "Iniciando deploy das Function Apps"
+                      echo "====================================="
+                      
+                      artifactPath="$(Pipeline.Workspace)/FunctionCIArtifacts/function-apps"
+                      
+                      if [ ! -d "$artifactPath" ]; then
+                        echo "##vso[task.logissue type=error]Artefatos não encontrados em $artifactPath"
+                        exit 1
+                      fi
+                      
+                      # Listar ZIPs disponíveis
+                      echo "Artefatos encontrados:"
+                      ls -lh "$artifactPath"/*.zip 2>/dev/null || echo "Nenhum ZIP encontrado"
+                      
+                      deployCount=0
+                      failCount=0
+                      
+                      # Fazer deploy de cada ZIP encontrado
+                      for zipFile in "$artifactPath"/*.zip; do
+                        if [ -f "$zipFile" ]; then
+                          # Extrair nome da function do arquivo (sempre será azurefunction.zip)
+                          funcName=$(basename "$zipFile" .zip)
+                          
+                          # Nome fixo correspondente ao gerado pela infra
+                          functionAppName="${{ parameters.uniqueSuffix }}-func-${funcName}-${{ parameters.environment }}"
+                          
+                          echo ""
+                          echo "-------------------------------------"
+                          echo "Deploying: $functionAppName"
+                          echo "Package: $zipFile"
+                          echo "-------------------------------------"
+                          
+                          # Verificar se a Function App existe
+                          if az functionapp show \
+                            --name "$functionAppName" \
+                            --resource-group "$(resourceGroupName)" \
+                            --output none 2>/dev/null; then
+                            
+                            # Fazer deploy via zip deploy
+                            echo "Fazendo deploy..."
+                            az functionapp deployment source config-zip \
+                              --resource-group "$(resourceGroupName)" \
+                              --name "$functionAppName" \
+                              --src "$zipFile" \
+                              --build-remote false
+                            
+                            if [ $? -eq 0 ]; then
+                              echo "✓ Deploy concluído com sucesso: $functionAppName"
+                              deployCount=$((deployCount + 1))
+                              
+                              # Aguardar e verificar status
+                              sleep 5
+                              functionUrl=$(az functionapp show \
+                                --name "$functionAppName" \
+                                --resource-group "$(resourceGroupName)" \
+                                --query "defaultHostName" -o tsv)
+                              
+                              echo "URL: https://$functionUrl"
+                            else
+                              echo "##vso[task.logissue type=error]Falha no deploy de $functionAppName"
+                              failCount=$((failCount + 1))
+                            fi
+                          else
+                            echo "##vso[task.logissue type=warning]Function App $functionAppName não existe no Azure"
+                            echo "Execute a pipeline de infraestrutura primeiro para criar os recursos"
+                            failCount=$((failCount + 1))
+                          fi
+                        fi
+                      done
+                      
+                      echo ""
+                      echo "====================================="
+                      echo "Resumo do Deploy"
+                      echo "====================================="
+                      echo "Sucesso: $deployCount"
+                      echo "Falhas: $failCount"
+                      
+                      if [ $failCount -gt 0 ]; then
+                        echo "##vso[task.logissue type=error]Alguns deploys falharam"
+                        exit 1
+                      fi
+                      
+                      if [ $deployCount -eq 0 ]; then
+                        echo "##vso[task.logissue type=warning]Nenhuma Function App foi deployada"
+                      fi

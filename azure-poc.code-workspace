@@ -1,0 +1,56 @@
+{
+  "folders": [
+    {
+      "name": "🏠 Project Root",
+      "path": "."
+    },
+    {
+      "name": "🔐 AKS - Authentication",
+      "path": "src/AKS/Authentication"
+    },
+    {
+      "name": "📦 AKS - Products",
+      "path": "src/AKS/Products"
+    },
+    {
+      "name": "👥 Azure Functions - Customer",
+      "path": "src/AzureFunctions/CustomerFunction"
+    },
+    {
+      "name": "🏭 Azure Functions - Supplier",
+      "path": "src/AzureFunctions/SupplierFunction"
+    },
+    {
+      "name": "📋 Logic App - Orders",
+      "path": "src/LogicApp/OrdersLogicApp"
+    },
+    {
+      "name": "🛒 Logic App - Cart",
+      "path": "src/LogicApp/CartLogicApp"
+    }
+  ],
+  "settings": {
+    "azureLogicAppsStandard.deploySubpath": "src/LogicApp/OrdersLogicApp",
+    "azureFunctions.deploySubpath": "src/AzureFunctions",
+    "files.exclude": {
+      "**/bin": true,
+      "**/obj": true,
+      "**/.vs": true
+    },
+    "terminal.integrated.env.windows": {
+      "PATH": "C:\\Users\\hernanecunha\\.azurelogicapps\\dependencies\\DotNetSDK;${env:PATH}"
+    },
+    "omnisharp.dotNetCliPaths": [
+      "C:\\Users\\hernanecunha\\.azurelogicapps\\dependencies\\DotNetSDK"
+    ]
+  },
+  "extensions": {
+    "recommendations": [
+      "ms-azuretools.vscode-azurelogicapps",
+      "ms-azuretools.vscode-azurefunctions",
+      "ms-kubernetes-tools.vscode-kubernetes-tools",
+      "ms-dotnettools.csharp",
+      "ms-azuretools.vscode-bicep"
+    ]
+  }
+}

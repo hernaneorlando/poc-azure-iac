@@ -1,0 +1,10 @@
+{
+  "name": "orders-logicapp",
+  "version": "1.0.0",
+  "description": "Logic App for Orders",
+  "scripts": {
+    "start": "func start"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

@@ -1,0 +1,72 @@
+{
+  "definition": {
+    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+    "actions": {
+      "Response": {
+        "type": "Response",
+        "inputs": {
+          "statusCode": 200,
+          "body": {
+            "success": true,
+            "message": "Orders retrieved successfully",
+            "data": "@variables('orders')"
+          },
+          "headers": {
+            "Content-Type": "application/json"
+          }
+        },
+        "runAfter": {
+          "Initialize_Orders": [
+            "Succeeded"
+          ]
+        }
+      },
+      "Initialize_Orders": {
+        "type": "InitializeVariable",
+        "inputs": {
+          "variables": [
+            {
+              "name": "orders",
+              "type": "array",
+              "value": [
+                {
+                  "orderId": 1,
+                  "customerName": "John Doe",
+                  "totalAmount": 299.99,
+                  "orderDate": "2024-01-10T10:00:00Z",
+                  "status": "Completed"
+                },
+                {
+                  "orderId": 2,
+                  "customerName": "Jane Smith",
+                  "totalAmount": 599.99,
+                  "orderDate": "2024-01-12T14:30:00Z",
+                  "status": "Processing"
+                },
+                {
+                  "orderId": 3,
+                  "customerName": "Bob Johnson",
+                  "totalAmount": 149.99,
+                  "orderDate": "2024-01-14T09:15:00Z",
+                  "status": "Shipped"
+                }
+              ]
+            }
+          ]
+        },
+        "runAfter": {}
+      }
+    },
+    "triggers": {
+      "manual": {
+        "type": "Request",
+        "kind": "Http",
+        "inputs": {
+          "schema": {},
+          "method": "GET"
+        }
+      }
+    },
+    "outputs": {}
+  }
+}

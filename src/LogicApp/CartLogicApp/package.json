@@ -1,0 +1,10 @@
+{
+  "name": "cart-logicapp",
+  "version": "1.0.0",
+  "description": "Logic App for Shopping Cart",
+  "scripts": {
+    "start": "func start"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

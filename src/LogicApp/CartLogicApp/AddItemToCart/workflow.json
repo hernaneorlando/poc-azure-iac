@@ -1,0 +1,94 @@
+{
+  "definition": {
+    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+    "contentVersion": "1.0.0.0",
+    "triggers": {
+      "manual": {
+        "type": "Request",
+        "kind": "Http",
+        "inputs": {
+          "schema": {
+            "type": "object",
+            "properties": {
+              "cartId": {
+                "type": "string",
+                "description": "Unique identifier for the shopping cart"
+              },
+              "productId": {
+                "type": "integer",
+                "description": "ID of the product to add"
+              },
+              "productName": {
+                "type": "string",
+                "description": "Name of the product"
+              },
+              "quantity": {
+                "type": "integer",
+                "description": "Quantity to add",
+                "minimum": 1
+              },
+              "unitPrice": {
+                "type": "number",
+                "description": "Price per unit"
+              }
+            },
+            "required": [
+              "cartId",
+              "productId",
+              "productName",
+              "quantity",
+              "unitPrice"
+            ]
+          }
+        }
+      }
+    },
+    "actions": {
+      "Initialize_Response": {
+        "type": "InitializeVariable",
+        "inputs": {
+          "variables": [
+            {
+              "name": "ResponseBody",
+              "type": "object",
+              "value": {
+                "success": true,
+                "message": "Item added to cart successfully",
+                "data": {
+                  "cartId": "@triggerBody()?['cartId']",
+                  "item": {
+                    "productId": "@triggerBody()?['productId']",
+                    "productName": "@triggerBody()?['productName']",
+                    "quantity": "@triggerBody()?['quantity']",
+                    "unitPrice": "@triggerBody()?['unitPrice']",
+                    "totalPrice": "@mul(triggerBody()?['quantity'], triggerBody()?['unitPrice'])"
+                  },
+                  "addedAt": "@utcNow()"
+                }
+              }
+            }
+          ]
+        },
+        "runAfter": {}
+      },
+      "Response": {
+        "type": "Response",
+        "kind": "Http",
+        "inputs": {
+          "statusCode": 201,
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "body": "@variables('ResponseBody')"
+        },
+        "runAfter": {
+          "Initialize_Response": [
+            "Succeeded"
+          ]
+        }
+      }
+    },
+    "outputs": {}
+  },
+  "kind": "Stateful"
+}

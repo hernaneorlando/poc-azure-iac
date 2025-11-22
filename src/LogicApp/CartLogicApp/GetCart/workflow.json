@@ -1,0 +1,109 @@
+{
+  "definition": {
+    "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+    "contentVersion": "1.0.0.0",
+    "triggers": {
+      "manual": {
+        "type": "Request",
+        "kind": "Http",
+        "inputs": {
+          "schema": {
+            "type": "object",
+            "properties": {
+              "cartId": {
+                "type": "string",
+                "description": "Unique identifier for the shopping cart"
+              }
+            },
+            "required": [
+              "cartId"
+            ]
+          }
+        }
+      }
+    },
+    "actions": {
+      "Initialize_Cart_Items": {
+        "type": "InitializeVariable",
+        "inputs": {
+          "variables": [
+            {
+              "name": "CartItems",
+              "type": "array",
+              "value": [
+                {
+                  "productId": 1,
+                  "productName": "Laptop",
+                  "quantity": 1,
+                  "unitPrice": 1299.99,
+                  "totalPrice": 1299.99
+                },
+                {
+                  "productId": 2,
+                  "productName": "Wireless Mouse",
+                  "quantity": 2,
+                  "unitPrice": 29.99,
+                  "totalPrice": 59.98
+                },
+                {
+                  "productId": 3,
+                  "productName": "USB-C Cable",
+                  "quantity": 3,
+                  "unitPrice": 12.99,
+                  "totalPrice": 38.97
+                }
+              ]
+            }
+          ]
+        },
+        "runAfter": {}
+      },
+      "Calculate_Total": {
+        "type": "InitializeVariable",
+        "inputs": {
+          "variables": [
+            {
+              "name": "CartTotal",
+              "type": "float",
+              "value": 1398.94
+            }
+          ]
+        },
+        "runAfter": {
+          "Initialize_Cart_Items": [
+            "Succeeded"
+          ]
+        }
+      },
+      "Response": {
+        "type": "Response",
+        "kind": "Http",
+        "inputs": {
+          "statusCode": 200,
+          "headers": {
+            "Content-Type": "application/json"
+          },
+          "body": {
+            "success": true,
+            "message": "Cart retrieved successfully",
+            "data": {
+              "cartId": "@triggerBody()?['cartId']",
+              "items": "@variables('CartItems')",
+              "itemCount": "@length(variables('CartItems'))",
+              "totalAmount": "@variables('CartTotal')",
+              "currency": "USD",
+              "lastUpdated": "@utcNow()"
+            }
+          }
+        },
+        "runAfter": {
+          "Calculate_Total": [
+            "Succeeded"
+          ]
+        }
+      }
+    },
+    "outputs": {}
+  },
+  "kind": "Stateful"
+}
